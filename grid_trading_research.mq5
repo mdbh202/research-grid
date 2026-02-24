@@ -53,16 +53,17 @@ input int      MagicBase               = 120000;  // Base magic number (unique p
 //| INPUT PARAMETERS — GROUP 2: GRID STRUCTURE                        |
 //+------------------------------------------------------------------+
 input group "═══ Grid Structure ═══"
-input double            GridStepMultiplier    = 0.25;      // Grid step = ATR × this value
-input double            GridStepFloor         = 5.00;      // Min grid step (USD)
-input double            GridStepCap           = 18.00;     // Max grid step (USD)
-input int               MaxLegs               = 5;         // Max legs per cluster
-input double            TPMultiplier          = 1.50;      // TP per leg = GridStep × this
-input int               LegScalingStart       = 4;         // First leg with scaled lot
-input double            LegScalingFactor      = 1.50;      // Lot multiplier for scaled legs
-input int               ATRPeriod             = 14;        // ATR calculation period
-input ENUM_TIMEFRAMES   ATRTimeframe          = PERIOD_D1; // ATR timeframe
-input double            SuspendATRThreshold   = 75.00;     // Suspend new clusters if ATR exceeds (USD)
+input double            GridStepMultiplier     = 0.25;       // Grid step = ATR × this value
+input double            GridStepFloor          = 5.00;       // Min grid step (USD)
+input double            GridStepCap            = 18.00;      // Max grid step (USD)
+input int               MaxLegs                = 5;          // Max legs per cluster
+input double            TPMultiplier           = 1.50;       // TP per leg = GridStep × this
+input int               LegScalingStart        = 4;          // First leg with scaled lot
+input double            LegScalingFactor       = 1.50;       // Lot multiplier for scaled legs
+input int               ATRPeriod              = 14;         // ATR calculation period
+input ENUM_TIMEFRAMES   ATRTimeframe           = PERIOD_D1;  // ATR timeframe
+// NEW
+input double            SuspendATRThreshold = 6.0;        // ATR as % of price above which trading is suspended
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS — GROUP 3: MODE SWITCHING                        |
@@ -2424,6 +2425,9 @@ void UpdateNewsCache()
 //+------------------------------------------------------------------+
 //| Send a market order with TP                                        |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Send a market order with TP                                        |
+//+------------------------------------------------------------------+
 bool SendMarketOrder(string symbol, ENUM_ORDER_TYPE type, double lots,
                      int magic, string comment, double tp, ulong &ticket)
 {
@@ -2438,7 +2442,8 @@ bool SendMarketOrder(string symbol, ENUM_ORDER_TYPE type, double lots,
    request.comment   = comment;
    request.deviation = 30;
    
-   // ── Set filling mode based on broker support ────────────────────
+   // ── Set filling mode ────────────────────────────────────────────
+   // Try broker-reported mode first, fall back to FOK
    long fillMode = SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
    
    if((fillMode & SYMBOL_FILLING_FOK) != 0)
@@ -2446,7 +2451,7 @@ bool SendMarketOrder(string symbol, ENUM_ORDER_TYPE type, double lots,
    else if((fillMode & SYMBOL_FILLING_IOC) != 0)
       request.type_filling = ORDER_FILLING_IOC;
    else
-      request.type_filling = ORDER_FILLING_RETURN;
+      request.type_filling = ORDER_FILLING_FOK;  // Default FOK, not RETURN
    
    // ── Set TP (normalize to tick size) ─────────────────────────────
    double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -2461,31 +2466,53 @@ bool SendMarketOrder(string symbol, ENUM_ORDER_TYPE type, double lots,
    else
       request.price = SymbolInfoDouble(symbol, SYMBOL_BID);
    
-   // ── Send ────────────────────────────────────────────────────────
-   if(!OrderSend(request, result))
+   // ── Send with retry ─────────────────────────────────────────────
+   for(int attempt = 1; attempt <= ORDERSEND_MAX_RETRIES; attempt++)
    {
-      Print("ERROR: OrderSend failed. ", symbol, " ", EnumToString(type),
+      // Refresh price on retry
+      if(attempt > 1)
+      {
+         if(type == ORDER_TYPE_BUY)
+            request.price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+         else
+            request.price = SymbolInfoDouble(symbol, SYMBOL_BID);
+         Sleep(ORDERSEND_RETRY_DELAY_MS);
+      }
+      
+      ResetLastError();
+      bool sent = OrderSend(request, result);
+      
+      if(sent && (result.retcode == TRADE_RETCODE_DONE || 
+                  result.retcode == TRADE_RETCODE_DONE_PARTIAL))
+      {
+         ticket = result.deal;
+         if(ticket == 0)
+            ticket = result.order;
+         return true;
+      }
+      
+      // If fill mode rejected, try the other mode
+      if(result.retcode == 10030) // Unsupported filling mode
+      {
+         if(request.type_filling == ORDER_FILLING_FOK)
+            request.type_filling = ORDER_FILLING_IOC;
+         else
+            request.type_filling = ORDER_FILLING_FOK;
+         
+         Print("RETRY: Switching fill mode to ", EnumToString(request.type_filling),
+               " (attempt ", attempt, "/", ORDERSEND_MAX_RETRIES, ")");
+         continue;
+      }
+      
+      Print("ERROR: OrderSend attempt ", attempt, "/", ORDERSEND_MAX_RETRIES,
+            ". ", symbol, " ", EnumToString(type),
             " ", lots, " lots. Error:", GetLastError(),
-            " RetCode:", result.retcode);
-      ticket = 0;
-      return false;
-   }
-   
-   if(result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_DONE_PARTIAL)
-   {
-      Print("ERROR: Order rejected. RetCode:", result.retcode,
+            " RetCode:", result.retcode,
             " Comment:", result.comment);
-      ticket = 0;
-      return false;
    }
    
-   ticket = result.deal;
-   
-   // If deal ticket is 0, try to get it from the order
-   if(ticket == 0)
-      ticket = result.order;
-   
-   return true;
+   ticket = 0;
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -2505,7 +2532,7 @@ bool ClosePosition(ulong ticket)
    request.volume    = PositionGetDouble(POSITION_VOLUME);
    request.deviation = 30;
    
-   // ── Set filling mode based on broker support ────────────────────
+   // ── Set filling mode ────────────────────────────────────────────
    long fillMode = SymbolInfoInteger(request.symbol, SYMBOL_FILLING_MODE);
    
    if((fillMode & SYMBOL_FILLING_FOK) != 0)
@@ -2513,7 +2540,7 @@ bool ClosePosition(ulong ticket)
    else if((fillMode & SYMBOL_FILLING_IOC) != 0)
       request.type_filling = ORDER_FILLING_IOC;
    else
-      request.type_filling = ORDER_FILLING_RETURN;
+      request.type_filling = ORDER_FILLING_FOK;  // Default FOK, not RETURN
    
    long posType = PositionGetInteger(POSITION_TYPE);
    if(posType == POSITION_TYPE_BUY)
@@ -2527,22 +2554,40 @@ bool ClosePosition(ulong ticket)
       request.price = SymbolInfoDouble(request.symbol, SYMBOL_ASK);
    }
    
-   if(!OrderSend(request, result))
+   for(int attempt = 1; attempt <= ORDERSEND_MAX_RETRIES; attempt++)
    {
-      Print("ERROR: ClosePosition failed. Ticket:", ticket,
+      if(attempt > 1)
+      {
+         if(posType == POSITION_TYPE_BUY)
+            request.price = SymbolInfoDouble(request.symbol, SYMBOL_BID);
+         else
+            request.price = SymbolInfoDouble(request.symbol, SYMBOL_ASK);
+         Sleep(ORDERSEND_RETRY_DELAY_MS);
+      }
+      
+      ResetLastError();
+      bool sent = OrderSend(request, result);
+      
+      if(sent && (result.retcode == TRADE_RETCODE_DONE || 
+                  result.retcode == TRADE_RETCODE_DONE_PARTIAL))
+         return true;
+      
+      if(result.retcode == 10030)
+      {
+         if(request.type_filling == ORDER_FILLING_FOK)
+            request.type_filling = ORDER_FILLING_IOC;
+         else
+            request.type_filling = ORDER_FILLING_FOK;
+         continue;
+      }
+      
+      Print("ERROR: ClosePosition attempt ", attempt, "/", ORDERSEND_MAX_RETRIES,
+            ". Ticket:", ticket,
             " Error:", GetLastError(),
             " RetCode:", result.retcode);
-      return false;
    }
    
-   if(result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_DONE_PARTIAL)
-   {
-      Print("ERROR: ClosePosition rejected. Ticket:", ticket,
-            " RetCode:", result.retcode);
-      return false;
-   }
-   
-   return true;
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -2953,10 +2998,7 @@ void OnTick()
    // ════════════════════════════════════════════════════════════════
    if(g_protectionModeActive)
       return; // EA is locked. Do nothing.
-   
-   CheckProtectionMode(); // May activate protection and return next tick
-   if(g_protectionModeActive)
-      return;
+
    
    // ════════════════════════════════════════════════════════════════
    // PRIORITY 2: Kill Switch
