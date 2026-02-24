@@ -1182,7 +1182,38 @@ bool CanOpenNewCluster()
    if(g_currentATR <= 0 || g_currentADX <= 0)
       return false;
 
-   // ── Check 13: Cooldown — one cluster per M15 bar ───────────────
+   // ── Check 13: Minimum equity pre-flight ────────────────────────
+   //    Estimate whether CalculateBaseLot() can produce >= volumeMin
+   //    to prevent per-tick spam when equity is too low.
+   {
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      double volumeMin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+      double totalWeightedLegs = GetTotalWeightedLegs();
+      double maxAdverseSteps = 3.0;
+      
+      if(contractSize > 0 && totalWeightedLegs > 0 && g_currentGridStep > 0 && RiskPerCluster > 0)
+      {
+         double minEquityNeeded = volumeMin * totalWeightedLegs * maxAdverseSteps 
+                                  * g_currentGridStep * contractSize / RiskPerCluster;
+         if(equity < minEquityNeeded)
+         {
+            // Log once per H1 bar, not every tick
+            static datetime lastInsufficientEquityLog = 0;
+            datetime currentBar = iTime(_Symbol, PERIOD_H1, 0);
+            if(currentBar != lastInsufficientEquityLog)
+            {
+               lastInsufficientEquityLog = currentBar;
+               Print("INFO: Equity ($", DoubleToString(equity, 2), 
+                     ") below minimum required ($", DoubleToString(minEquityNeeded, 2),
+                     ") for grid parameters. Skipping cluster open.");
+            }
+            return false;
+         }
+      }
+   }
+
+   // ── Check 14: Cooldown — one cluster per M15 bar ───────────────
    datetime currentBar = iTime(_Symbol, PERIOD_M15, 0);
    if(currentBar == g_lastClusterOpenBar)
       return false;
@@ -1249,7 +1280,7 @@ bool OpenCluster(int slotIndex, ENUM_GRID_MODE mode, ENUM_CLUSTER_DIRECTION dir)
    double baseLot = CalculateBaseLot(gridStep);
    if(baseLot <= 0)
    {
-      Print("WARNING: Cannot open cluster — insufficient equity for risk budget.");
+      // Warning already throttled in CalculateBaseLot — no need to double-log
       return false;
    }
    
@@ -1784,9 +1815,17 @@ double CalculateBaseLot(double gridStep)
    // Check minimum
    if(baseLot < volumeMin)
    {
-      Print("WARNING: Calculated BaseLot (", DoubleToString(baseLot, 4),
-            ") below minimum (", DoubleToString(volumeMin, 2),
-            "). Insufficient equity for risk budget.");
+      static datetime lastBaseLotWarnBar = 0;
+      datetime currentBar = iTime(_Symbol, PERIOD_M15, 0);
+      if(currentBar != lastBaseLotWarnBar)
+      {
+         lastBaseLotWarnBar = currentBar;
+         Print("WARNING: Calculated BaseLot (", DoubleToString(baseLot, 4),
+               ") below minimum (", DoubleToString(volumeMin, 2),
+               "). Insufficient equity for risk budget.",
+               " Equity=$", DoubleToString(equity, 2),
+               " GridStep=$", DoubleToString(gridStep, 2));
+      }
       return 0;
    }
    
