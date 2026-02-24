@@ -381,7 +381,6 @@ int OnInit()
    DiagnosticPrintMarketState();
    
    return(INIT_SUCCEEDED);
-   return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
@@ -2500,7 +2499,7 @@ bool SendMarketOrder(string symbol, ENUM_ORDER_TYPE type, double lots,
    else if((fillMode & SYMBOL_FILLING_IOC) != 0)
       request.type_filling = ORDER_FILLING_IOC;
    else
-      request.type_filling = ORDER_FILLING_FOK;  // Default FOK, not RETURN
+      request.type_filling = ORDER_FILLING_RETURN;  // Default RETURN when neither FOK nor IOC reported
    
    // ── Set TP (normalize to tick size) ─────────────────────────────
    double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -2540,11 +2539,13 @@ bool SendMarketOrder(string symbol, ENUM_ORDER_TYPE type, double lots,
          return true;
       }
       
-      // If fill mode rejected, try the other mode
+      // If fill mode rejected, cycle through all three modes: FOK → IOC → RETURN → FOK
       if(result.retcode == 10030) // Unsupported filling mode
       {
          if(request.type_filling == ORDER_FILLING_FOK)
             request.type_filling = ORDER_FILLING_IOC;
+         else if(request.type_filling == ORDER_FILLING_IOC)
+            request.type_filling = ORDER_FILLING_RETURN;
          else
             request.type_filling = ORDER_FILLING_FOK;
          
@@ -2589,7 +2590,7 @@ bool ClosePosition(ulong ticket)
    else if((fillMode & SYMBOL_FILLING_IOC) != 0)
       request.type_filling = ORDER_FILLING_IOC;
    else
-      request.type_filling = ORDER_FILLING_FOK;  // Default FOK, not RETURN
+      request.type_filling = ORDER_FILLING_RETURN;  // Default RETURN when neither FOK nor IOC reported
    
    long posType = PositionGetInteger(POSITION_TYPE);
    if(posType == POSITION_TYPE_BUY)
@@ -2625,6 +2626,8 @@ bool ClosePosition(ulong ticket)
       {
          if(request.type_filling == ORDER_FILLING_FOK)
             request.type_filling = ORDER_FILLING_IOC;
+         else if(request.type_filling == ORDER_FILLING_IOC)
+            request.type_filling = ORDER_FILLING_RETURN;
          else
             request.type_filling = ORDER_FILLING_FOK;
          continue;
@@ -3045,13 +3048,6 @@ void OnTick()
       return; // Nothing else runs
    
    CheckProtectionMode();
-   // ════════════════════════════════════════════════════════════════
-   // PRIORITY 1: Account Protection Mode
-   // ════════════════════════════════════════════════════════════════
-   if(g_protectionModeActive)
-      return; // EA is locked. Do nothing.
-
-   
    // ════════════════════════════════════════════════════════════════
    // PRIORITY 2: Kill Switch
    // ════════════════════════════════════════════════════════════════
