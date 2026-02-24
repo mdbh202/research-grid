@@ -63,7 +63,7 @@ input double            LegScalingFactor       = 1.50;       // Lot multiplier f
 input int               ATRPeriod              = 14;         // ATR calculation period
 input ENUM_TIMEFRAMES   ATRTimeframe           = PERIOD_D1;  // ATR timeframe
 // NEW
-input double            SuspendATRThreshold = 6.0;        // ATR as % of price above which trading is suspended
+input double            SuspendATRPctThreshold = 6.0;     // ATR as % of price above which trading is suspended
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS — GROUP 3: MODE SWITCHING                        |
@@ -556,6 +556,13 @@ bool ValidateInputs()
    {
       Print("ERROR [V12]: HedgeForceCloseMultiplier (", HedgeForceCloseMultiplier, 
             ") out of range 0.5–2.0");
+      valid = false;
+   }
+   
+   // V13: ATR suspension percentage
+   if(SuspendATRPctThreshold < 0.5 || SuspendATRPctThreshold > 20.0)
+   {
+      Print("ERROR [V13]: SuspendATRPctThreshold (", SuspendATRPctThreshold, ") out of range 0.5–20.0%");
       valid = false;
    }
    
@@ -1094,8 +1101,11 @@ void DiagnosticPrintMarketState()
          ", cap: $", DoubleToString(GridStepCap, 2), ")");
    Print("║ Grid Mode:    ", EnumToString(g_currentMode));
    Print("║ Trend Dir:    ", EnumToString(g_trendDirection));
-   Print("║ ATR Suspended: ", (g_currentATR > SuspendATRThreshold) ? "YES" : "NO",
-         "  (threshold: $", DoubleToString(SuspendATRThreshold, 2), ")");
+   double diagMidPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
+   double diagAtrPct = (diagMidPrice > 0) ? (g_currentATR / diagMidPrice) * 100.0 : 0.0;
+   Print("║ ATR Suspended: ", (diagAtrPct > SuspendATRPctThreshold) ? "YES" : "NO",
+         "  (ATR: ", DoubleToString(diagAtrPct, 2), "% of price, threshold: ", 
+         DoubleToString(SuspendATRPctThreshold, 2), "%)");
    Print("╠══════════════════════════════════════════════════════╣");
    
    // Entry signal checks
@@ -2867,7 +2877,10 @@ bool IsBeforeCutoff()
 //+------------------------------------------------------------------+
 bool IsSuspended()
 {
-   return (g_currentATR > SuspendATRThreshold);
+   double midPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
+   if(midPrice <= 0) return false;
+   double atrPct = (g_currentATR / midPrice) * 100.0;
+   return (atrPct > SuspendATRPctThreshold);
 }
 
 //+------------------------------------------------------------------+
